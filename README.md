@@ -1,282 +1,292 @@
-OrCanNet
-========
+# OrCanNet: CNN-ViT Hybrid Model for Oral Disease Classification
+
+A hybrid deep learning framework combining a CNN branch (EfficientNet-B0) and a Vision Transformer (ViT) branch with attention-weighted feature fusion for multi-class oral disease classification.
+
+## Overview
+
+OrCanNet leverages the complementary strengths of two architectures:
+- **EfficientNet-B0 (CNN)**: Captures local texture, lesion boundaries, and fine-grained surface details
+- **Vision Transformer (ViT)**: Captures global spatial context and long-range dependencies
+
+A learnable **attention-weighted fusion module** combines features from both branches, enabling the model to dynamically balance local and global cues for robust oral disease classification.
+
+## Dataset: MOD (Mouth and Oral Diseases)
+
+**Classes**: 7 oral disease categories
+- **CaS** — Canker sores
+- **CoS** — Cold sores  
+- **Gum** — Gingival disease
+- **MC** — Mucocele
+- **OC** — Oral cancer
+- **OLP** — Oral lichen planus
+- **OT** — Other lesions
+
+**Data Split**:
+- Training: 2,035 images (original) → 3,150 after augmentation
+- Validation: ~420 images
+- Test: 1,028 images
+
+**Class Balancing**: Training set resampled to 450 images per class using offline augmentation (RandomResizedCrop, horizontal flip, rotation, color jittering) to eliminate majority-class bias and improve ViT convergence.
+
+## Model Architecture
+
+### 1. CNN Branch (EfficientNet-B0)
+```
+Input (224×224)
+    ↓
+EfficientNet-B0 Backbone (pretrained on ImageNet)
+    ↓
+Multi-scale feature extraction (F1, F2, F3)
+    ↓
+Global Average Pooling
+    ↓
+Output: 1,280-dim feature vector
+```
+
+### 2. Vision Transformer Branch
+```
+Input (224×224)
+    ↓
+ViT-Small-Patch16-224 (vit_small_patch16_224, pretrained)
+    ↓
+CLS token extraction
+    ↓
+Output: 384-dim embedding
+```
+
+### 3. Feature Fusion Module
+
+**Concatenation & Projection**:
+- Concatenate CNN (1,280-dim) + ViT (384-dim) → 1,664-dim
+- Project to 512-dim via linear layer + ReLU
+
+**Attention-Weighted Fusion**:
+```
+Attention Computation:
+  attn_hidden = ReLU(Linear(fused_512 → 128))
+  attn_weights = Softmax(Linear(attn_hidden → 512))
+
+Weighted Output:
+  fused_output = fused_512 * attn_weights
+```
+
+**Auxiliary Losses**:
+- CNN branch auxiliary classifier (1,280-dim → 7 classes)
+- ViT branch auxiliary classifier (384-dim → 7 classes)
+- Provides additional supervision and interpretability
+
+### 4. Classifier Head
+```
+Fused Features (512-dim)
+    ↓
+Dropout (p=0.3)
+    ↓
+Linear Layer (512 → 7 classes)
+    ↓
+Output: 7-class logits
+```
+
+## Training Configuration
+
+| Parameter | Value |
+|-----------|-------|
+| **Batch Size** | 32 |
+| **Optimizer** | AdamW |
+| **Weight Decay** | 1e-4 |
+| **Gradient Clipping** | 1.0 |
+| **Label Smoothing** | 0.1 |
+| **Early Stopping Patience** | 5 epochs |
+| **Max Epochs** | 50 |
+| **Actual Training** | 27 epochs (early stopped) |
+
+### Two-Stage Training Strategy
+
+**Phase 1: Frozen Backbone (Epochs 1–5)**
+- CNN & ViT backbones frozen; only fusion module and classifier trainable
+- Learning rate: 3e-4
+- Purpose: Stable initialization of fusion module on balanced data
+
+**Phase 2: Unfrozen Backbone (Epoch 6 onward)**
+- All parameters trainable with **differential learning rates**:
+  - CNN backbone: 1e-5
+  - ViT backbone: 1e-5
+  - Fusion module: 3e-5
+  - Classifier head: 3e-5
+- Purpose: Fine-tune pretrained features with lower learning rates
+
+### Loss Function
+```
+Total Loss = L_main + λ × (L_cnn_aux + L_vit_aux)
+
+where:
+  L_main      = Weighted cross-entropy (main classifier)
+  L_cnn_aux   = Cross-entropy (CNN auxiliary classifier)
+  L_vit_aux   = Cross-entropy (ViT auxiliary classifier)
+  λ           = 0.1 (auxiliary loss weight)
+  
+Weights are inverse class frequencies (balanced sampling)
+```
+
+**Scheduler**: Cosine Annealing (T_max=50)
+
+## Training Results
+
+### Training Dynamics
+
+Training exhibited smooth convergence with two distinct phases:
+
+**Phase 1 (Frozen, Epochs 1–5)**:
+- Loss: 2.20 → 1.63
+- Val Acc: 31.3% → 51.0%
+- Model learned stable fusion module
+
+**Phase 2 (Unfrozen, Epochs 6+)**:
+- Loss: 1.49 → 0.65
+- Val Acc: 54.2% → **99.42%** (peak at Epoch 22)
+- Dramatic improvement after backbone fine-tuning
+
+**Early Stopping**: Triggered at Epoch 27 (no improvement for 5 consecutive epochs)
+
+### Final Test Set Performance
+
+**Overall Metrics** (1,028 test samples):
+- **Accuracy**: 99%
+- **Macro Precision**: 0.99
+- **Macro Recall**: 0.99
+- **Macro F1-Score**: 0.99
+
+**Per-Class Performance**:
+
+| Class | Precision | Recall | F1-Score | Support |
+|-------|-----------|--------|----------|---------|
+| CaS   | 0.98      | 1.00   | 0.99     | 160     |
+| CoS   | 1.00      | 1.00   | 1.00     | 149     |
+| Gum   | 0.98      | 1.00   | 0.99     | 120     |
+| MC    | 0.98      | 0.98   | 0.98     | 180     |
+| OC    | 0.99      | 0.98   | 0.99     | 108     |
+| OLP   | 1.00      | 0.98   | 0.99     | 180     |
+| OT    | 0.99      | 1.00   | 1.00     | 131     |
+
+**Confusion Matrix Summary**:
+- **Total Correct**: 1,018 / 1,028 (99.03%)
+- **Total Misclassifications**: 10 (0.97%)
+
+Misclassified samples show minimal confusion:
+- 1 CaS → MC
+- 2 MC → Gum, 1 MC → OC  
+- 2 OC → MC
+- 2 OLP → CaS, 1 OLP → MC, 1 OLP → OT
+
+### Cross-Validation Metrics
+- **ROC-AUC (One-vs-Rest)**: 1.00 across all classes
+- **Precision-Recall**: Excellent curves indicating well-separated decision boundaries
+- **Confidence Analysis**: Model maintains high confidence (>0.8) on correct predictions
+
+## Usage
+
+### Requirements
+```
+torch >= 2.0
+torchvision >= 0.15
+timm >= 0.6.0
+numpy >= 1.24
+matplotlib >= 3.7
+seaborn >= 0.12
+scikit-learn >= 1.2
+albumentations >= 1.3
+opencv-python >= 4.7
+```
 
-CNN-ViT Disagreement-Aware Oral Disease Classification
+### Installation
+```bash
+pip install torch torchvision timm albumentations scikit-learn matplotlib seaborn
+```
 
-OrCanNet is a hybrid deep learning framework for multi-class oral disease
-classification.  It combines a convolutional neural network (CNN) branch and
-a Vision Transformer (ViT) branch under a disagreement-aware adaptive fusion
-mechanism.  The design addresses a known limitation of pure self-attention
-architectures on small, imbalanced medical imaging datasets: ViT models
-require large training corpora to generalise, while CNNs saturate on global
-context.  The fusion module detects per-sample disagreement between the two
-branches and adjusts their relative contribution dynamically at inference
-time, without requiring separate models or ensembles.
+### Training from Scratch
 
+1. **Prepare Dataset**:
+   - Organize MOD dataset into `data_root/Training/`, `data_root/Validation/`, `data_root/Testing/`
+   - Each subdirectory contains class folders
 
-Table of Contents
------------------
+2. **Update Paths** in training script:
+   ```python
+   data_root = "/path/to/MOD/dataset"
+   MODEL_SAVE_PATH = "/path/to/save/teeth.pth"
+   ```
 
-  1. Dataset
-  2. Data Preparation
-  3. Model Architecture
-  4. Training Configuration
-  5. Training Dynamics
-  6. Evaluation Results
-  7. Explainability
-  8. Reproduction
-  9. Dependencies
+3. **Run Training**:
+   ```bash
+   python MODConcat1.py
+   ```
 
+   The script will:
+   - Load and augment training data (offline augmentation on GPU)
+   - Initialize OrCanNet with frozen backbone
+   - Train for 5 epochs with frozen backbone
+   - Unfreeze backbone and train with differential learning rates
+   - Apply early stopping when validation accuracy plateaus
+   - Save best checkpoint and generate evaluation plots
 
-1. Dataset
-----------
+### Inference
 
-Dataset: MOD — Mouth and Oral Diseases Dataset
-Classes: 7
+```python
+import torch
+from torchvision import transforms
 
-  CaS   — Canker sores
-  CoS   — Cold sores
-  Gum   — Gingival disease
-  MC    — Mucocele
-  OC    — Oral cancer
-  OLP   — Oral lichen planus
-  OT    — Other lesions
+# Load model
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = OrCanNet(num_classes=7).to(device)
+model.load_state_dict(torch.load("teeth.pth"))
+model.eval()
 
-Original training split: approximately 2035 images.  Per-class counts ranged
-from roughly 210 to 370, yielding a moderately imbalanced distribution that
-presents non-trivial risk for transformer training and hybrid model stability
-at this scale.
+# Prepare input
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+])
 
-Validation and test sets were kept intact throughout all preprocessing steps
-to preserve evaluation integrity.
+image = transform(PIL_image).unsqueeze(0).to(device)
 
+# Predict
+with torch.no_grad():
+    logits, _, _ = model(image)
+    probs = torch.softmax(logits, dim=1)
+    pred_class = torch.argmax(probs, dim=1)
 
-2. Data Preparation
--------------------
+class_names = ["CaS", "CoS", "Gum", "MC", "OC", "OLP", "OT"]
+print(f"Prediction: {class_names[pred_class.item()]}")
+print(f"Confidence: {probs.max().item():.2%}")
+```
 
-2.1  Offline Augmentation
+## Key Design Insights
 
-The training set was expanded offline using Albumentations.  The following
-transforms were applied per image:
+1. **Two-Stage Training**: Freezing the backbone initially stabilizes the fusion module on balanced data, then fine-tuning with differential learning rates avoids destructive updates to pretrained features.
 
-  - RandomResizedCrop
-  - Horizontal flip
-  - Rotation (mild angle range)
-  - RandomBrightnessContrast
-  - CLAHE (contrast-limited adaptive histogram equalisation, retained for
-    medical texture fidelity)
+2. **Attention-Weighted Fusion**: Rather than naive concatenation, learned attention weights allow the model to dynamically balance CNN (local) and ViT (global) features based on image content.
 
-Augmentation was applied independently per class.
+3. **Auxiliary Losses**: Branch-specific classifiers provide additional supervision during training and enable later interpretability without architectural changes.
 
-2.2  Class Balancing
+4. **Class Balancing**: Augmenting the training set to 450 images per class eliminates majority-class bias—particularly important for ViT convergence on small datasets.
 
-After augmentation each class was resampled to exactly 450 images:
+5. **Label Smoothing & Gradient Clipping**: Prevents overconfidence and stabilizes training on medical imaging data with potential labeling noise.
 
-  450 images/class * 7 classes = 3150 training images total
+## Explainability
 
-This eliminates majority-class bias, stabilises ViT gradient updates, and
-improves recall on minority classes.
+The trained model supports three interpretability approaches:
 
-2.3  I/O Optimisation
+1. **Grad-CAM** (CNN branch): Highlights salient local regions in EfficientNet feature maps
+2. **Attention Maps** (ViT branch): Visualizes CLS-token attention weights to identify global regions of interest
+3. **Fusion Heatmap**: Shows where the attention-weighted fusion diverges from raw branch outputs
 
-Training on Google Colab exhibited significant throughput degradation when
-reading directly from Google Drive.  The dataset was copied to local Colab
-storage (/content/) prior to training, yielding a substantial reduction in
-per-epoch wall time.
+Together, these reveal the model's decision-making process across local and global spatial scales.
 
+## Reproduction Notes
 
-3. Model Architecture
----------------------
+- All training was performed on Google Colab T4 GPU
+- Offline augmentation ensured consistent per-epoch augmentation across runs
+- Copying augmented dataset to local Colab storage (/content/) significantly reduced I/O bottlenecks
+- Best model was selected at Epoch 22 (Val Acc: 99.42%) but early stopping allowed training to continue until Epoch 27 with minimal overfitting
+- No test-time augmentation, ensembling, or external data was used
 
-OrCanNet is composed of three sub-systems: a CNN branch, a ViT branch, and a
-disagreement-aware fusion module.
 
-3.1  CNN Branch
-
-  Backbone         : EfficientNet-B0 (ImageNet pretrained)
-  Feature scales   : F1, F2, F3 (multi-scale extraction)
-  Pooling          : Global average pooling per scale
-  Auxiliary output : Softmax classifier over 7 classes
-
-The CNN branch captures local texture cues, lesion boundary structure, and
-surface irregularities at multiple spatial resolutions.
-
-3.2  Vision Transformer Branch
-
-  Backbone         : ViT-Small-Patch16-224 (timm 1.0.24)
-  Representation   : CLS token
-  Auxiliary output : Softmax classifier over 7 classes
-
-The ViT branch captures long-range spatial dependencies, global structural
-context, and macro lesion distribution patterns.
-
-3.3  Disagreement-Aware Fusion
-
-Given auxiliary predictions P_cnn and P_vit from each branch:
-
-  Step 1 — Compute scalar disagreement:
-
-      D = sum( |P_cnn - P_vit| )
-
-  Step 2 — Derive adaptive weight via a learned linear gate:
-
-      alpha = sigmoid( w * D + b )
-
-  Step 3 — Blend fused and raw representations:
-
-      F = alpha * Phi + (1 - alpha) * Raw
-
-When branch predictions agree, the gate suppresses correction.  When they
-diverge, it increases the contribution of the attention-weighted fusion
-representation.  This is end-to-end differentiable and adds no inference
-overhead beyond a single dot product and sigmoid.
-
-3.4  Multi-Scale Aggregation
-
-CNN feature maps F1, F2, F3 are spatially upsampled to a common resolution,
-concatenated along the channel axis, and reduced via 1x1 convolution followed
-by global average pooling.  The resulting vector is concatenated with the
-fusion output F before the final linear classifier.
-
-3.5  Loss Function
-
-Total loss combines the main classification cross-entropy with two auxiliary
-cross-entropy terms:
-
-    L = L_main + lambda * (L_cnn_aux + L_vit_aux)
-
-    lambda = 0.2
-
-
-4. Training Configuration
---------------------------
-
-  Framework      : PyTorch
-  Hardware       : Google Colab T4 GPU
-  Epochs         : 20
-  Batch size     : 8
-  Optimizer      : Adam
-  Learning rate  : 1e-4
-  Aux loss weight: 0.2
-  Input size     : 224 x 224
-  Training set   : 3150 images
-
-
-5. Training Dynamics
---------------------
-
-5.1  Training Loss
-
-  Epoch 1   1.2967
-  Epoch 2   0.2964
-  Epoch 4   0.0781
-  Epoch 7   0.0303
-  Epoch 14  0.0119
-  Epoch 20  0.0454
-
-Loss decreases sharply from epoch 1 to epoch 7, stabilises through epoch 14,
-and exhibits a marginal uptick at epoch 20 consistent with end-of-schedule
-noise.  No divergence was observed.
-
-5.2  Validation Accuracy
-
-Range: 56% – 69%
-
-Notable peaks:
-
-  Epoch 2   69.09%
-  Epoch 10  69.09%
-
-The validation set is small, so single-percentage oscillations are within
-expected statistical variance.  No catastrophic overfitting was detected.
-
-
-6. Evaluation Results
----------------------
-
-Test set size: 54 images (6–10 samples per class)
-
-Overall metrics:
-
-  Accuracy          0.78
-  Macro F1-score    0.77
-  Weighted F1-score 0.77
-
-Per-class F1:
-
-  Class   F1
-  ------  ----
-  CoS     0.94
-  Gum     0.88
-  CaS     0.82
-  OLP     0.75
-  MC      0.71
-  OC      0.67
-  OT      0.62
-
-CoS, Gum, and CaS exhibit strong discriminability.  OC and OT show lower F1,
-attributable primarily to the small per-class test support (6–8 samples) and
-intra-class visual heterogeneity.  No ensembling, test-time augmentation, or
-external data was used.
-
-
-7. Explainability
------------------
-
-The trained model exposes three interpretability pathways without requiring
-retraining or architectural modification:
-
-  CNN Grad-CAM
-      Gradient-weighted class activation maps computed on the EfficientNet
-      feature maps.  Highlights salient local regions that drove the CNN
-      prediction.
-
-  ViT Attention Map
-      CLS-token attention weights extracted from the final transformer block
-      via a registered forward hook.  Adapted for the timm 1.0.24 API.
-      Visualises global regions of interest captured by self-attention.
-
-  Disagreement Fusion Heatmap
-      Overlay derived from the per-sample disagreement scalar D and the
-      fusion weight alpha.  Shows where and how much the model relied on the
-      attention-corrected representation versus the raw branch outputs.
-
-These three visualisations together demonstrate local vs. global focus
-separation and the dynamic weighting behaviour of the fusion gate.
-
-
-8. Reproduction
----------------
-
-The full pipeline is implemented in a single Jupyter notebook intended for
-Google Colab.  To reproduce:
-
-  1. Mount Google Drive and place the MOD dataset under the expected path.
-  2. Run the augmentation cells to expand and balance the training split to
-     3150 images.
-  3. Copy the dataset to local Colab storage for I/O performance.
-  4. Run the model definition, training, and evaluation cells in order.
-  5. The notebook saves a checkpoint that is reloaded for the explainability
-     section; no re-training is required for visualisation.
-
-The saved checkpoint is compatible with the explainability pipeline provided
-in the same notebook.
-
-
-9. Dependencies
----------------
-
-  torch          >= 2.0
-  torchvision    >= 0.15
-  timm           == 1.0.24
-  albumentations >= 1.3
-  opencv-python  >= 4.7
-  numpy          >= 1.24
-  matplotlib     >= 3.7
-  scikit-learn   >= 1.2
-  Pillow         >= 9.5
-  grad-cam       (pytorch-grad-cam)
-
-timm version is pinned to 1.0.24 because the attention hook extraction logic
-depends on the internal ViT block API introduced in that release.  Using a
-different timm version may require adapting the attention extraction code.
