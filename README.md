@@ -21,13 +21,6 @@ A learnable **attention-weighted fusion module** combines features from both bra
 - **OLP** — Oral lichen planus
 - **OT** — Other lesions
 
-**Data Split**:
-- Training: 2,035 images (original) → 3,150 after augmentation
-- Validation: ~420 images
-- Test: 1,028 images
-
-**Class Balancing**: Training set resampled to 450 images per class using offline augmentation (RandomResizedCrop, horizontal flip, rotation, color jittering) to eliminate majority-class bias and improve ViT convergence.
-
 ## Model Architecture
 
 ### 1. CNN Branch (EfficientNet-B0)
